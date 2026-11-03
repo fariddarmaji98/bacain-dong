@@ -5,8 +5,11 @@
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const HIGHLIGHT_CLASS = 'bacain-dong-reading';
-  // Short chunks: Chrome's remote voices can stall silently on utterances longer than ~15 s.
-  const MAX_CHUNK = 160;
+  // Short chunks for the browser voice: Chrome's remote voices can stall silently on utterances
+  // longer than ~15 s. The cloud voice takes longer chunks (fewer requests, fewer gaps).
+  const BROWSER_CHUNK = 160;
+  const CLOUD_CHUNK = 300;
+  const CLOUD_PREFETCH = 2; // chunks fetched ahead of the one playing
   // Parts of a page that are not worth reading aloud.
   const SKIP_SELECTOR = 'script,style,noscript,template,svg,canvas,iframe,select,textarea,input,button,'
     + 'nav,aside,footer,[role=navigation],[role=complementary],[role=contentinfo],[role=banner],[aria-hidden=true]';
@@ -53,7 +56,11 @@
   const reader = freshReader();
 
   function freshReader() {
-    return { state: 'idle', chunks: [], total: 0, index: 0, charIn: 0, done: false, session: 0, utterance: null, block: null };
+    return {
+      state: 'idle', chunks: [], total: 0, index: 0, charIn: 0, done: false, session: 0, utterance: null, block: null,
+      engine: 'browser', lang: '', voice: '', announced: false, loading: false, pauseWanted: false,
+      ctx: null, audio: null, cache: new Map(), timer: 0, // cloud voice playback
+    };
   }
 
   // ---------- widget ----------
@@ -124,7 +131,12 @@
     if (reader.state === 'idle') return reader.done ? 1 : 0;
     const c = reader.chunks[reader.index];
     if (!c || !reader.total) return 0;
-    return Math.min(1, (c.start + Math.min(reader.charIn, c.text.length)) / reader.total);
+    let charIn = reader.charIn;
+    if (reader.engine === 'cloud' && reader.audio && reader.ctx) {
+      // No word boundaries from the cloud voice: estimate from the audio clock (it stops while paused).
+      charIn = c.text.length * ((reader.ctx.currentTime - reader.audio.startedAt) / reader.audio.duration);
+    }
+    return Math.min(1, Math.max(0, (c.start + Math.min(charIn, c.text.length)) / reader.total));
   }
 
   function renderProgress() {
@@ -155,7 +167,7 @@
   }
 
   // Walk the readable text, group it by its nearest block-level ancestor, split into chunks.
-  function collectChunks() {
+  function collectChunks(maxChunk) {
     const root = pickRoot();
     const blockCache = new Map();
     const blocks = []; // { el, raw } in document order; adjacent text of one block is merged
@@ -198,7 +210,7 @@
     for (const { el: node, raw } of blocks) {
       const text = raw.replace(/\s+/g, ' ').trim();
       if (!/[\p{L}\p{N}]/u.test(text)) continue;
-      for (const part of splitText(text, MAX_CHUNK)) {
+      for (const part of splitText(text, maxChunk)) {
         chunks.push({ el: node, text: part, start: total });
         total += part.length;
       }
@@ -237,9 +249,25 @@
     scheduleProgress();
   }
 
+  function closeAudio() {
+    clearInterval(reader.timer);
+    reader.timer = 0;
+    reader.cache = new Map();
+    if (reader.audio) {
+      reader.audio.src.onended = null;
+      try { reader.audio.src.stop(); } catch (e) { /* never started */ }
+      reader.audio = null;
+    }
+    if (reader.ctx) {
+      reader.ctx.close().catch(() => {});
+      reader.ctx = null;
+    }
+  }
+
   function cancelSpeech() {
     reader.session++;
     reader.utterance = null;
+    closeAudio();
     const synth = window.speechSynthesis;
     if (synth && (synth.speaking || synth.pending || synth.paused)) {
       synth.cancel();
@@ -247,20 +275,24 @@
     }
   }
 
+  function finishReading() {
+    closeAudio();
+    clearHighlight();
+    reader.done = true;
+    setState('idle');
+    say('Finished reading.');
+  }
+
+  // ---- browser voice (speechSynthesis)
+
   function speakFrom(i) {
     const session = reader.session;
-    if (i >= reader.chunks.length) {
-      clearHighlight();
-      reader.done = true;
-      setState('idle');
-      say('Finished reading.');
-      return;
-    }
+    if (i >= reader.chunks.length) return finishReading();
     reader.index = i;
     reader.charIn = 0;
     const chunk = reader.chunks[i];
     const u = new SpeechSynthesisUtterance(chunk.text);
-    if (document.documentElement.lang) u.lang = document.documentElement.lang;
+    if (reader.lang) u.lang = reader.lang;
     u.onstart = () => {
       if (session !== reader.session) return;
       focusBlock(chunk.el);
@@ -286,31 +318,155 @@
     window.speechSynthesis.speak(u);
   }
 
-  function play() {
-    if (!window.speechSynthesis) return say('Speech synthesis is not available on this page.');
+  // ---- cloud voice (Google Cloud TTS through the service worker, played with Web Audio)
+
+  // Audio goes through an AudioContext, not an <audio> element, so the page's media-src CSP cannot block it.
+  function getAudio(i) {
+    if (!reader.cache.has(i)) {
+      const ctx = reader.ctx;
+      const text = reader.chunks[i].text;
+      const lang = reader.lang;
+      const pending = (async () => {
+        const res = await chrome.runtime.sendMessage({ type: 'tts:synthesize', text, lang });
+        if (!res || !res.ok) throw new Error((res && res.error) || 'No response from extension.');
+        reader.voice = res.voice;
+        const bytes = Uint8Array.from(atob(res.audio), (c) => c.charCodeAt(0));
+        return ctx.decodeAudioData(bytes.buffer);
+      })();
+      pending.catch(() => {}); // a prefetch nobody awaits must not raise an unhandled rejection
+      reader.cache.set(i, pending);
+    }
+    return reader.cache.get(i);
+  }
+
+  // Re-cut the not-yet-read chunks to a new size, keeping their position in the progress total.
+  function resplit(from, max) {
+    let start = reader.chunks[from] ? reader.chunks[from].start : reader.total;
+    const tail = [];
+    for (const c of reader.chunks.slice(from)) {
+      for (const part of splitText(c.text, max)) {
+        tail.push({ el: c.el, text: part, start });
+        start += part.length;
+      }
+    }
+    reader.chunks = reader.chunks.slice(0, from).concat(tail);
+  }
+
+  function fallbackToBrowser(i, why) {
+    closeAudio();
+    if (!window.speechSynthesis) {
+      stop();
+      return say(`Cloud voice failed (${why}).`, 10000);
+    }
+    say(`Cloud voice failed (${why}). Using browser voice.`, 10000);
+    reader.engine = 'browser';
+    resplit(i, BROWSER_CHUNK);
+    speakFrom(i);
+    if (reader.state === 'paused') window.speechSynthesis.pause(); // keep the UI and the audio in agreement
+  }
+
+  async function speakCloud(i) {
+    const session = reader.session;
+    if (i >= reader.chunks.length) return finishReading();
+    reader.index = i;
+    reader.charIn = 0;
+    reader.audio = null; // the previous chunk's clock must not drive this chunk's progress while it buffers
+    const current = getAudio(i);
+    for (let k = 1; k <= CLOUD_PREFETCH && i + k < reader.chunks.length; k++) getAudio(i + k);
+    let buffer;
+    try {
+      buffer = await current;
+    } catch (e) {
+      if (session === reader.session) fallbackToBrowser(i, e.message || String(e));
+      return;
+    }
+    if (session !== reader.session) return;
+    for (const k of reader.cache.keys()) if (k < i) reader.cache.delete(k); // free chunks already played
+    focusBlock(reader.chunks[i].el);
+    if (!reader.announced) {
+      reader.announced = true;
+      say(`Cloud voice: ${reader.voice}`);
+    }
+    const src = reader.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(reader.ctx.destination);
+    reader.audio = { src, duration: buffer.duration, startedAt: reader.ctx.currentTime };
+    src.onended = () => {
+      if (session === reader.session) speakCloud(i + 1);
+    };
+    if (reader.state === 'playing' && reader.ctx.state === 'suspended') reader.ctx.resume();
+    src.start();
+    if (!reader.timer) reader.timer = setInterval(scheduleProgress, 250);
+  }
+
+  // ---- controls
+
+  async function play() {
     if (reader.state === 'paused') {
-      window.speechSynthesis.resume();
+      if (reader.loading) { // Pause was pressed while the engine was still being chosen
+        reader.pauseWanted = false;
+        return setState('playing');
+      }
+      if (reader.engine === 'cloud') reader.ctx.resume();
+      else window.speechSynthesis.resume();
       return setState('playing');
     }
-    const { chunks, total } = collectChunks();
-    if (!chunks.length) return say('Nothing to read on this page.');
+    if (reader.state === 'playing') return;
     const fromStart = reader.done;
     cancelSpeech();
-    Object.assign(reader, { chunks, total, done: false });
+    const session = reader.session;
     setState('playing');
-    speakFrom(fromStart ? 0 : firstVisibleIndex(chunks));
+    reader.loading = true;
+    try {
+      let cloud = false;
+      try {
+        cloud = !!(await chrome.runtime.sendMessage({ type: 'tts:info' })).enabled;
+      } catch (e) { /* extension reloaded or no answer: use the browser voice */ }
+      if (session !== reader.session) return;
+      reader.loading = false;
+      if (cloud) {
+        try { reader.ctx = new AudioContext(); } catch (e) { cloud = false; }
+      }
+      const { chunks, total } = collectChunks(cloud ? CLOUD_CHUNK : BROWSER_CHUNK);
+      if (!chunks.length || (!cloud && !window.speechSynthesis)) {
+        closeAudio();
+        setState('idle');
+        return say(chunks.length ? 'Speech synthesis is not available on this page.' : 'Nothing to read on this page.');
+      }
+      Object.assign(reader, {
+        chunks, total, done: false, engine: cloud ? 'cloud' : 'browser', announced: false, voice: '',
+        lang: guessLanguage(chunks.slice(0, 40).map((c) => c.text).join(' '), document.documentElement.lang),
+      });
+      const start = fromStart ? 0 : firstVisibleIndex(chunks);
+      if (cloud) speakCloud(start);
+      else speakFrom(start);
+      if (reader.pauseWanted) { // Pause was pressed during the wait: start paused
+        reader.pauseWanted = false;
+        if (cloud) reader.ctx.suspend();
+        else window.speechSynthesis.pause();
+      }
+    } catch (e) {
+      if (session !== reader.session) return;
+      stop();
+      say(`Cannot start reading: ${e.message || e}`, 8000);
+    }
   }
 
   function pause() {
     if (reader.state !== 'playing') return;
-    window.speechSynthesis.pause();
+    if (reader.loading) {
+      reader.pauseWanted = true;
+      return setState('paused');
+    }
+    if (reader.engine === 'cloud') reader.ctx.suspend();
+    else window.speechSynthesis.pause();
     setState('paused');
   }
 
   function stop() {
     cancelSpeech();
     clearHighlight();
-    Object.assign(reader, { chunks: [], total: 0, index: 0, charIn: 0, done: false });
+    Object.assign(reader, { chunks: [], total: 0, index: 0, charIn: 0, done: false, loading: false, pauseWanted: false });
     setState('idle');
   }
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <style>
-  body { width: 220px; margin: 0; padding: 14px; font: 13px system-ui, sans-serif; }
+  body { width: 260px; margin: 0; padding: 14px; font: 13px system-ui, sans-serif; }
   h1 { margin: 0 0 10px; font-size: 14px; color: #3b82f6; }
   .row { display: flex; gap: 6px; }
   button {
@@ -13,6 +13,10 @@
   button.sel { background: #3b82f6; color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
   p { margin: 10px 0 0; color: #666; font-size: 11px; }
+  hr { margin: 14px 0 10px; border: 0; border-top: 1px solid #ddd; }
+  h2 { margin: 0 0 6px; font-size: 12px; }
+  input { box-sizing: border-box; width: 100%; margin-bottom: 6px; padding: 6px; border: 1px solid #bbb; border-radius: 5px; font: inherit; }
+  .row.small button { padding: 5px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -22,6 +26,15 @@
     <button id="off">Deactive</button>
   </div>
   <p id="status">Checking…</p>
+  <hr>
+  <h2>Cloud voice (Google Text-to-Speech)</h2>
+  <input id="key" type="password" placeholder="API key" autocomplete="off" spellcheck="false">
+  <input id="voice" placeholder="Voice (optional), e.g. id-ID-Chirp3-HD-Kore" autocomplete="off" spellcheck="false">
+  <div class="row small">
+    <button id="save">Save</button>
+    <button id="clear">Remove key</button>
+  </div>
+  <p id="cloud"></p>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -38,3 +38,27 @@ function splitLong(s, max) {
   if (rest) out.push(rest);
   return out;
 }
+
+// "id" -> "id-ID", "en" -> "en-US", "pt_br" -> "pt-BR"; unknown tags are returned as given.
+function normalizeLang(tag) {
+  const t = String(tag || '').trim();
+  const regional = t.match(/^([a-z]{2,3})[-_]([a-z]{2})$/i);
+  if (regional) return `${regional[1].toLowerCase() === 'in' ? 'id' : regional[1].toLowerCase()}-${regional[2].toUpperCase()}`; // 'in' = legacy code for Indonesian
+  const defaults = { in: 'id-ID', id: 'id-ID', en: 'en-US', fr: 'fr-FR', de: 'de-DE', es: 'es-ES', pt: 'pt-BR', it: 'it-IT', nl: 'nl-NL', ja: 'ja-JP', ko: 'ko-KR', ru: 'ru-RU' };
+  return defaults[t.toLowerCase()] || t;
+}
+
+// Indonesian pages often carry no <html lang> or a wrong one, so look at the words first.
+function guessLanguage(sample, htmlLang) {
+  const ID = ' yang yg dan di ke dari untuk dengan ini itu adalah pada dalam tidak gak nggak akan juga atau karena sebagai oleh saya kami anda bisa dapat sudah udah telah lebih mereka ada namun tetapi kalau jika masih sangat banget semua harus antara setelah sebelum ketika saat bahwa kepada ';
+  const EN = ' the and of to is in that for it with as on was are this be by at or from have not you but we ';
+  const words = sample.toLowerCase().match(/\p{L}+/gu) || [];
+  let id = 0;
+  let en = 0;
+  for (const w of words) {
+    if (ID.includes(` ${w} `)) id++;
+    else if (EN.includes(` ${w} `)) en++;
+  }
+  if (words.length >= 10 && id >= 3 && id > en && id / words.length > 0.08) return 'id-ID';
+  return normalizeLang(htmlLang) || 'en-US';
+}

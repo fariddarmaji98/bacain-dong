@@ -40,7 +40,7 @@ jobs:
           import json, os, sys, zipfile, pathlib
           m = json.load(open("manifest.json"))
           assert "content_scripts" not in m and "host_permissions" not in m, "host permission regressed"
-          allowed = {"activeTab", "scripting", "downloads", "pageCapture", "offscreen", "identity", "unlimitedStorage"}
+          allowed = {"storage", "activeTab", "scripting", "downloads", "pageCapture", "offscreen", "identity", "unlimitedStorage"}
           assert set(m["permissions"]) <= allowed, m["permissions"]
           z = pathlib.Path("build") / f"bacain-dong-v{m['version']}.zip"
           names = set(zipfile.ZipFile(z).namelist())

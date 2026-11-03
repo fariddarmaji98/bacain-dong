@@ -268,18 +268,135 @@ async function syncDraftsKeepAlive(progress) {
   }
 }
 
+// ---------- cloud voice (Google Cloud Text-to-Speech) ----------
+
+const TTS_API = 'https://texttospeech.googleapis.com/v1';
+// Best voice first. id-ID has Chirp3-HD, Wavenet and Standard voices (no Neural2).
+const VOICE_TIERS = ['Chirp3-HD', 'Wavenet', 'Standard'];
+// Kept under the smallest monthly free quota (1M characters for Chirp 3 HD). Counted locally, per
+// browser profile, so it is a guard, not Google's own meter.
+const TTS_MONTHLY_CHAR_CAP = 900000;
+const TTS_MAX_TEXT = 1000;
+
+function ttsError(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  return e;
+}
+
+async function googleError(res) {
+  let detail = '';
+  try { detail = (await res.json()).error.message; } catch (e) { /* no JSON body */ }
+  return ttsError(res.status === 429 ? 'quota' : 'http', `Google TTS ${res.status}${detail ? `: ${detail}` : ''}`);
+}
+
+// Usage updates are queued: several chunks are fetched at once and each one read-modify-writes the counter.
+let usageQueue = Promise.resolve();
+function adjustUsage(delta, enforceCap) {
+  const run = usageQueue.then(async () => {
+    const { ttsUsage } = await chrome.storage.local.get('ttsUsage');
+    const month = new Date().toISOString().slice(0, 7);
+    const used = ttsUsage && ttsUsage.month === month ? ttsUsage.chars : 0;
+    if (enforceCap && used + delta > TTS_MONTHLY_CHAR_CAP) {
+      throw ttsError('cap', `Monthly cloud voice limit reached (${TTS_MONTHLY_CHAR_CAP.toLocaleString('en-US')} characters).`);
+    }
+    await chrome.storage.local.set({ ttsUsage: { month, chars: Math.max(0, used + delta) } });
+  });
+  usageQueue = run.catch(() => {});
+  return run;
+}
+
+async function ttsUsageInfo() {
+  const { ttsKey, ttsUsage } = await chrome.storage.local.get(['ttsKey', 'ttsUsage']);
+  const month = new Date().toISOString().slice(0, 7);
+  return { enabled: !!ttsKey, used: ttsUsage && ttsUsage.month === month ? ttsUsage.chars : 0, cap: TTS_MONTHLY_CHAR_CAP };
+}
+
+// Several chunks are requested at once, so concurrent first lookups share one voices.list call.
+const voiceLookups = new Map();
+
+async function lookupVoice(key, lang) {
+  const { ttsVoiceCache } = await chrome.storage.local.get('ttsVoiceCache');
+  const cache = ttsVoiceCache || {};
+  if (cache[lang]) return cache[lang];
+  const res = await fetch(`${TTS_API}/voices?languageCode=${encodeURIComponent(lang)}&key=${encodeURIComponent(key)}`);
+  if (!res.ok) throw await googleError(res);
+  const names = ((await res.json()).voices || []).map((v) => v.name).sort();
+  for (const tier of VOICE_TIERS) {
+    const hit = names.find((n) => n.includes(`-${tier}-`));
+    if (hit) {
+      // Re-read right before writing: another language may have been cached while we waited on the network.
+      const { ttsVoiceCache: latest } = await chrome.storage.local.get('ttsVoiceCache');
+      await chrome.storage.local.set({ ttsVoiceCache: { ...(latest || {}), [lang]: hit } });
+      return hit;
+    }
+  }
+  throw ttsError('novoice', `No Google voice for ${lang}.`);
+}
+
+async function pickVoice(key, lang) {
+  const { ttsVoice } = await chrome.storage.local.get('ttsVoice');
+  if (ttsVoice && ttsVoice.startsWith(`${lang}-`)) return ttsVoice; // user override for this language
+  if (!voiceLookups.has(lang)) {
+    voiceLookups.set(lang, lookupVoice(key, lang).finally(() => voiceLookups.delete(lang)));
+  }
+  return voiceLookups.get(lang);
+}
+
+async function synthesize(text, lang) {
+  if (typeof text !== 'string' || !text.trim() || text.length > TTS_MAX_TEXT || typeof lang !== 'string') {
+    throw ttsError('input', 'Invalid text for cloud voice.');
+  }
+  const { ttsKey } = await chrome.storage.local.get('ttsKey');
+  if (!ttsKey) throw ttsError('nokey', 'No Google TTS API key set.');
+  await adjustUsage(text.length, true);
+  try {
+    const voice = await pickVoice(ttsKey, lang);
+    const res = await fetch(`${TTS_API}/text:synthesize?key=${encodeURIComponent(ttsKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: { text },
+        voice: { languageCode: lang, name: voice },
+        audioConfig: { audioEncoding: 'MP3' },
+      }),
+    });
+    if (!res.ok) throw await googleError(res);
+    const { audioContent } = await res.json();
+    if (!audioContent) throw ttsError('http', 'Google TTS returned no audio.');
+    return { audio: audioContent, voice };
+  } catch (e) {
+    await adjustUsage(-text.length, false); // nothing was synthesized, give the characters back
+    throw e;
+  }
+}
+
 // ---------- messaging ----------
+
+const fail = (sendResponse) => (e) => sendResponse({ ok: false, code: e.code || 'error', error: e.message || String(e) });
 
 // Saves run one at a time: they share the offscreen document and the folder-name check.
 let saveQueue = Promise.resolve();
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== 'draft:save') return;
-  const tab = sender.tab || {};
-  saveQueue = saveQueue
-    .then(() => saveDraft(tab.id, msg.title || tab.title, msg.url || tab.url))
-    .then((r) => sendResponse({ ok: true, ...r }))
-    .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
-  return true;
+  if (!msg) return;
+  if (msg.type === 'draft:save') {
+    const tab = sender.tab || {};
+    saveQueue = saveQueue
+      .then(() => saveDraft(tab.id, msg.title || tab.title, msg.url || tab.url))
+      .then((r) => sendResponse({ ok: true, ...r }))
+      .catch(fail(sendResponse));
+    return true;
+  }
+  if (msg.type === 'tts:info' || msg.type === 'tts:usage') {
+    ttsUsageInfo().then(sendResponse).catch(() => sendResponse({ enabled: false, used: 0, cap: TTS_MONTHLY_CHAR_CAP }));
+    return true;
+  }
+  if (msg.type === 'tts:synthesize') {
+    synthesize(msg.text, msg.lang)
+      .then((r) => sendResponse({ ok: true, ...r }))
+      .catch(fail(sendResponse));
+    return true;
+  }
 });
 
 let syncing = false;

@@ -5,6 +5,7 @@
   "description": "Read any page aloud with a floating player, track reading progress, save pages as local drafts and sync them to Google Drive.",
   "minimum_chrome_version": "116",
   "permissions": [
+    "storage",
     "activeTab",
     "scripting",
     "downloads",

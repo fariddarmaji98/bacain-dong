@@ -7,7 +7,7 @@ Chrome extension (Manifest V3) untuk **membacakan halaman web**, menyimpan halam
 - Klik icon extension → popup **Active / Deactive** (per tab).
 - Saat **Active**, panel mengambang muncul di pojok kanan bawah halaman:
   - **Persentase** halaman yang sudah di-scroll atau dibaca (mana yang lebih jauh).
-  - **Play / Pause** — satu tombol bergantian: saat belum jalan/di-pause yang tampil Play, saat jalan yang tampil Pause. Play membacakan teks halaman (text-to-speech bawaan browser), mulai dari bagian yang sedang terlihat, paragraf yang dibaca di-highlight dan halaman ikut ter-scroll.
+  - **Play / Pause** — satu tombol bergantian: saat belum jalan/di-pause yang tampil Play, saat jalan yang tampil Pause. Play membacakan teks halaman, mulai dari bagian yang sedang terlihat, paragraf yang dibaca di-highlight dan halaman ikut ter-scroll. Suara: **cloud voice Google** kalau API key diisi (lebih natural, lihat bagian Cloud voice), kalau tidak suara bawaan browser.
   - **Stop** — hentikan bacaan dan reset posisi baca.
   - **Save to draft** — simpan halaman ke folder baru bernama judul halaman.
   - **Sync** — login Google lalu upload semua folder draft yang belum ada di Google Drive.
@@ -20,6 +20,26 @@ Chrome extension (Manifest V3) untuk **membacakan halaman web**, menyimpan halam
 4. Buka halaman web apa pun → klik icon extension → **Active**
 
 Content script di-inject saat popup dibuka (permission `activeTab`), jadi tidak perlu reload tab. Tanpa host permission.
+
+## Cloud voice (suara lebih natural, gratis dalam kuota)
+
+Suara bawaan browser sering terdengar robotik untuk bahasa Indonesia. Extension bisa memakai **Google Cloud Text-to-Speech**: `id-ID` punya suara Chirp3-HD, Wavenet, dan Standard. Extension memilih yang terbaik secara otomatis (Chirp3-HD → Wavenet → Standard); nama suara bisa dipaksa lewat kolom **Voice** di popup (mis. `id-ID-Chirp3-HD-Kore`).
+
+Kuota gratis per bulan (angka dari situs pihak ketiga, **cek halaman harga resmi Google** sebelum mengandalkannya): Standard/Wavenet 4 juta karakter, Chirp3-HD 1 juta karakter. Di atas itu berbayar. Project Google Cloud kemungkinan perlu billing aktif walau pemakaian masih di bawah kuota.
+
+Setup:
+
+1. Di project Google Cloud yang sama dengan OAuth Drive: **APIs & Services → Library** → aktifkan **Cloud Text-to-Speech API**.
+2. **Credentials → Create credentials → API key**. Batasi key ke **Cloud Text-to-Speech API** saja, dan pasang **budget alert** di Billing.
+3. Klik icon extension → tempel key di kolom **API key** → **Save**. Popup mengecek key ke Google (hanya memastikan key diterima, bukan bahwa billing sudah aktif) dan menampilkan hasilnya; key yang ditolak Google tidak disimpan.
+
+Cara kerja dan batasannya:
+
+- Dengan key, teks halaman dikirim ke Google untuk disintesis. Tanpa key, extension tidak mengirim teks ke mana pun; tetapi suara bawaan browser sendiri bisa berupa suara online milik Chrome (di luar kendali extension).
+- Key disimpan di `chrome.storage.local` browser ini (tidak terenkripsi) dan hanya dipakai service worker, bukan halaman.
+- Ada **pagar pemakaian 900.000 karakter per bulan** (di bawah kuota gratis terkecil), dihitung lokal per profil browser, dengan bulan menurut UTC. Ini bukan meteran Google: pemakaian lain di project yang sama tidak ikut terhitung. Batas ada di `TTS_MONTHLY_CHAR_CAP` (`background.js`).
+- Kalau cloud voice gagal (key salah, kuota habis, offline), pembacaan lanjut dengan suara browser dan alasannya tampil di panel.
+- Bahasa dideteksi dari kata-kata teks (Indonesia vs lainnya), lalu atribut `<html lang>`; halaman Indonesia yang salah label `lang` tetap dibaca dengan suara Indonesia.
 
 ## Draft
 
@@ -105,12 +125,12 @@ python build.py 1.0.1     # bump versi + rebuild zip di build/
 
 ```
 manifest.json     # MV3 config
-background.js     # service worker: simpan draft (MHTML), download, sync Google Drive
+background.js     # service worker: simpan draft (MHTML), download, sync Google Drive, cloud voice (Google TTS)
 db.js             # IndexedDB draft store (dipakai background.js + offscreen.js)
 offscreen.html/js # bikin blob: URL untuk chrome.downloads (service worker tak punya createObjectURL)
-text.js           # helper pecah teks jadi potongan bacaan
-content.js        # panel mengambang, progress, text-to-speech, tombol draft/sync
-popup.html/js     # toggle Active / Deactive + inject content script on demand
+text.js           # helper pecah teks jadi potongan bacaan + deteksi bahasa
+content.js        # panel mengambang, progress, pemutar suara (browser/cloud), tombol draft/sync
+popup.html/js     # toggle Active / Deactive, pengaturan API key cloud voice, inject content script on demand
 generate_icons.py # generator icon PNG
 build.py          # bikin zip siap upload ke Chrome Web Store
 ```
