@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Bacain Dong",
+  "version": "1.0.0",
+  "description": "Read any page aloud with a floating player, track reading progress, save pages as local drafts and sync them to Google Drive.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "pageCapture",
+    "offscreen",
+    "identity",
+    "unlimitedStorage"
+  ],
+  "oauth2": {
+    "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/drive.file"
+    ]
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Bacain Dong",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

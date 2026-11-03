@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 220px; margin: 0; padding: 14px; font: 13px system-ui, sans-serif; }
+  h1 { margin: 0 0 10px; font-size: 14px; color: #3b82f6; }
+  .row { display: flex; gap: 6px; }
+  button {
+    flex: 1; padding: 8px; border: 1px solid #3b82f6; border-radius: 5px;
+    background: #fff; color: #3b82f6; font-weight: 600; cursor: pointer;
+  }
+  button.sel { background: #3b82f6; color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  p { margin: 10px 0 0; color: #666; font-size: 11px; }
+</style>
+</head>
+<body>
+  <h1>Bacain Dong</h1>
+  <div class="row">
+    <button id="on">Active</button>
+    <button id="off">Deactive</button>
+  </div>
+  <p id="status">Checking…</p>
+  <script src="popup.js"></script>
+</body>
+</html>

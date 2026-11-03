@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # Tag v1.2.3 -> manifest version 1.2.3, then build the zip.
+      - name: Build extension package
+        id: build
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION=$(python -c "import json;print(json.load(open('manifest.json'))['version'])")
+          fi
+          python build.py "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "zip=build/bacain-dong-v${VERSION}.zip" >> "$GITHUB_OUTPUT"
+          ls -la build/
+
+      - name: Verify package
+        env:
+          CWS_EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
+        run: |
+          python - <<'PY'
+          import json, os, sys, zipfile, pathlib
+          m = json.load(open("manifest.json"))
+          assert "content_scripts" not in m and "host_permissions" not in m, "host permission regressed"
+          allowed = {"activeTab", "scripting", "downloads", "pageCapture", "offscreen", "identity", "unlimitedStorage"}
+          assert set(m["permissions"]) <= allowed, m["permissions"]
+          z = pathlib.Path("build") / f"bacain-dong-v{m['version']}.zip"
+          names = set(zipfile.ZipFile(z).namelist())
+          for required in ("manifest.json", "background.js", "db.js", "offscreen.html", "offscreen.js", "text.js", "content.js", "popup.html", "popup.js"):
+              assert required in names, f"missing {required}"
+          assert not any(n.endswith(".py") for n in names), names
+          assert not any("/" in n for n in names), names
+          if m["oauth2"]["client_id"].startswith("YOUR_CLIENT_ID"):
+              if os.environ.get("CWS_EXTENSION_ID"):
+                  sys.exit("oauth2.client_id in manifest.json is still the placeholder - refusing to publish a build whose Drive sync cannot work.")
+              print("::warning::oauth2.client_id in manifest.json is still the placeholder - Drive sync will not work.")
+          print("package OK:", z.name, sorted(names))
+          PY
+
+      - name: Upload to Chrome Web Store
+        env:
+          EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
+          CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          ZIP: ${{ steps.build.outputs.zip }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          if [ -z "$EXTENSION_ID" ] || [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$REFRESH_TOKEN" ]; then
+            echo "::notice::Chrome Web Store secrets not configured — skipping store upload."
+            echo "Add CWS_EXTENSION_ID, CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN in repo Settings > Secrets and variables > Actions."
+            exit 0
+          fi
+          # Bump failed uploads rather than half-publishing: upload first, then publish.
+          npx --yes chrome-webstore-upload-cli@3 upload \
+            --source "$ZIP" \
+            --extension-id "$EXTENSION_ID" \
+            --client-id "$CLIENT_ID" \
+            --client-secret "$CLIENT_SECRET" \
+            --refresh-token "$REFRESH_TOKEN"
+          echo "Uploaded v$VERSION. Submitting for review…"
+          npx --yes chrome-webstore-upload-cli@3 publish \
+            --extension-id "$EXTENSION_ID" \
+            --client-id "$CLIENT_ID" \
+            --client-secret "$CLIENT_SECRET" \
+            --refresh-token "$REFRESH_TOKEN"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push'
+        with:
+          files: ${{ steps.build.outputs.zip }}
+          generate_release_notes: true
+          body: |
+            Chrome Web Store package for v${{ steps.build.outputs.version }}.
+
+            Install manually: download the zip below, unzip, then load it unpacked from `chrome://extensions`.
